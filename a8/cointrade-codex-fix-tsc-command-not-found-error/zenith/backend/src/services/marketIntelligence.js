@@ -259,13 +259,9 @@ const deriveLocalSignal = (metrics) => {
   };
 };
 
-export async function getMarketSnapshot(binance, symbol, options = {}) {
-  const interval = options.interval ?? '1m';
-  const limit = options.limit ?? 120;
-
-  const candles = await binance.fetchKlines(symbol, interval, limit);
-  if (!candles || candles.length === 0) {
-    throw new Error(`No candles returned for ${symbol}`);
+export function buildSnapshotFromCandles(symbol, interval, candles) {
+  if (!Array.isArray(candles) || candles.length === 0) {
+    throw new Error('No candles provided for market snapshot');
   }
 
   const closes = candles.map((candle) => candle.close);
@@ -373,6 +369,110 @@ export async function getMarketSnapshot(binance, symbol, options = {}) {
   };
 }
 
+export async function getMarketSnapshot(binance, symbol, options = {}) {
+  const interval = options.interval ?? '1m';
+  const requestedLimit = options.limit ?? 240;
+  const limit = Math.max(90, Math.min(requestedLimit, 500));
+
+  const candles = await binance.fetchKlines(symbol, interval, limit);
+  if (!candles || candles.length === 0) {
+    throw new Error(`No candles returned for ${symbol}`);
+  }
+
+  const [ticker24h, funding, openInterest, takerRatios] = await Promise.all([
+    binance.fetch24hTicker(symbol).catch(() => null),
+    binance.fetchFundingRate(symbol).catch(() => null),
+    binance.fetchOpenInterest(symbol).catch(() => null),
+    binance.fetchTakerLongShortRatio(symbol, '5m', 24).catch(() => []),
+  ]);
+
+  const snapshot = buildSnapshotFromCandles(symbol, interval, candles);
+  const metrics = { ...snapshot.metrics };
+
+  if (ticker24h) {
+    metrics.change24hPct = ticker24h.priceChangePercent;
+    metrics.lastPrice = Number.isFinite(ticker24h.lastPrice) ? ticker24h.lastPrice : metrics.lastPrice;
+    metrics.high24h = ticker24h.highPrice;
+    metrics.low24h = ticker24h.lowPrice;
+    metrics.volume24h = ticker24h.volume;
+    metrics.quoteVolume24h = ticker24h.quoteVolume;
+  }
+
+  if (funding) {
+    metrics.markPrice = funding.markPrice;
+    metrics.indexPrice = funding.indexPrice;
+    metrics.fundingRate = funding.lastFundingRate;
+    metrics.nextFundingTime = funding.nextFundingTime
+      ? new Date(funding.nextFundingTime).toISOString()
+      : undefined;
+    metrics.estimatedSettlePrice = funding.estimatedSettlePrice;
+  }
+
+  if (openInterest) {
+    metrics.openInterest = openInterest.openInterest;
+    metrics.openInterestTime = openInterest.time
+      ? new Date(openInterest.time).toISOString()
+      : undefined;
+  }
+
+  if (Array.isArray(takerRatios) && takerRatios.length > 0) {
+    const totals = takerRatios.reduce(
+      (acc, entry) => ({
+        buy: acc.buy + (Number.isFinite(entry.buyVolume) ? entry.buyVolume : 0),
+        sell: acc.sell + (Number.isFinite(entry.sellVolume) ? entry.sellVolume : 0),
+      }),
+      { buy: 0, sell: 0 }
+    );
+    const rawRatio = totals.sell > 0 ? totals.buy / totals.sell : totals.buy > 0 ? 10 : 1;
+    const ratio = Math.max(0, Math.min(rawRatio, 10));
+    metrics.takerLongShortRatio = ratio;
+    metrics.takerLongShortBias = ratio > 1.05 ? 'long' : ratio < 0.95 ? 'short' : 'balanced';
+  }
+
+  const context = (() => {
+    try {
+      return JSON.parse(snapshot.promptContext);
+    } catch (_error) {
+      return {};
+    }
+  })();
+
+  if (ticker24h) {
+    context.ticker_24h = {
+      change_pct: round(ticker24h.priceChangePercent, 2),
+      high: round(ticker24h.highPrice, 2),
+      low: round(ticker24h.lowPrice, 2),
+      volume: round(ticker24h.volume, 2),
+      quote_volume: round(ticker24h.quoteVolume, 2),
+    };
+  }
+  if (funding) {
+    context.derivatives = {
+      funding_rate: round(funding.lastFundingRate * 100, 4),
+      next_funding: metrics.nextFundingTime,
+      mark_price: round(funding.markPrice, 2),
+      index_price: round(funding.indexPrice, 2),
+      estimated_settle: round(funding.estimatedSettlePrice, 2),
+    };
+  }
+  if (openInterest) {
+    context.open_interest = {
+      contracts: round(openInterest.openInterest, 2),
+      as_of: metrics.openInterestTime,
+    };
+  }
+  if (Number.isFinite(metrics.takerLongShortRatio)) {
+    context.taker_flow = {
+      ratio: round(metrics.takerLongShortRatio, 3),
+      bias: metrics.takerLongShortBias,
+    };
+  }
+
+  snapshot.metrics = metrics;
+  snapshot.promptContext = JSON.stringify(context);
+  return snapshot;
+}
+
 export async function getChartSeries(binance, symbol, options = {}) {
   try {
     const snapshot = await getMarketSnapshot(binance, symbol, options);
@@ -393,6 +493,7 @@ export async function getChartSeries(binance, symbol, options = {}) {
         change1mPct: round(snapshot.metrics.change1mPct, 2),
         change5mPct: round(snapshot.metrics.change5mPct, 2),
         change15mPct: round(snapshot.metrics.change15mPct, 2),
+        change24hPct: round(snapshot.metrics.change24hPct ?? 0, 2),
         ema21: round(snapshot.metrics.ema21, 2),
         ema55: round(snapshot.metrics.ema55, 2),
         rsi14: round(snapshot.metrics.rsi14, 2),
@@ -405,6 +506,21 @@ export async function getChartSeries(binance, symbol, options = {}) {
         support: round(snapshot.metrics.support, 2),
         resistance: round(snapshot.metrics.resistance, 2),
         atrPct: round(snapshot.metrics.atrPct, 3),
+        high24h: round(snapshot.metrics.high24h ?? 0, 2),
+        low24h: round(snapshot.metrics.low24h ?? 0, 2),
+        volume24h: round(snapshot.metrics.volume24h ?? 0, 2),
+        quoteVolume24h: round(snapshot.metrics.quoteVolume24h ?? 0, 2),
+        fundingRatePct: round((snapshot.metrics.fundingRate ?? 0) * 100, 4),
+        markPrice: round(snapshot.metrics.markPrice ?? snapshot.metrics.lastPrice, 2),
+        indexPrice: round(snapshot.metrics.indexPrice ?? 0, 2),
+        estimatedSettlePrice: round(snapshot.metrics.estimatedSettlePrice ?? 0, 2),
+        nextFundingTime: snapshot.metrics.nextFundingTime,
+        openInterest: round(snapshot.metrics.openInterest ?? 0, 3),
+        openInterestTime: snapshot.metrics.openInterestTime,
+        takerLongShortRatio: Number.isFinite(snapshot.metrics.takerLongShortRatio)
+          ? round(snapshot.metrics.takerLongShortRatio, 3)
+          : undefined,
+        takerLongShortBias: snapshot.metrics.takerLongShortBias,
         localSignal: snapshot.metrics.localSignal,
         lastUpdated: snapshot.metrics.lastUpdated,
       },

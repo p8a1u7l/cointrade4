@@ -3,8 +3,8 @@ import clsx from 'clsx';
 import { dashboardConfig } from './config';
 import { ControlPanel } from './components/ControlPanel';
 import { MetricCard } from './components/MetricCard';
-import { MoversBoard } from './components/MoversBoard';
-import { PriceChart } from './components/PriceChart';
+import { PerformanceBoard, type PerformanceEntry } from './components/PerformanceBoard';
+import { EquityChart } from './components/EquityChart';
 
 interface MetricsPayload {
   balance: number;
@@ -12,6 +12,12 @@ interface MetricsPayload {
   pnlPercent: number;
   realized: number;
   riskLevel: number;
+  winRate?: number;
+  wins?: number;
+  losses?: number;
+  breakeven?: number;
+  trades?: number;
+  performance?: PerformanceEntry[];
   openAi?: {
     promptTokens: number;
     completionTokens: number;
@@ -44,9 +50,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [riskLevel, setRiskLevel] = useState(3);
-  const availableSymbols = dashboardConfig.symbols.length > 0 ? dashboardConfig.symbols : ['BTCUSDT'];
-  const [selectedSymbol, setSelectedSymbol] = useState<string>(availableSymbols[0]);
-
   const openAiUsage = metrics?.openAi;
   const totalCalls = openAiUsage?.calls ?? 0;
   const primaryModel = openAiUsage?.byModel && openAiUsage.byModel.length > 0 ? openAiUsage.byModel[0] : null;
@@ -57,6 +60,10 @@ export default function App() {
           primaryModel.calls === 1 ? 'call' : 'calls'
         })`
       : '';
+  const winRate = metrics?.winRate ?? 0;
+  const wins = metrics?.wins ?? 0;
+  const losses = metrics?.losses ?? 0;
+  const trades = metrics?.trades ?? 0;
 
   const formatUsd = (value: number) =>
     value.toLocaleString(undefined, {
@@ -147,7 +154,7 @@ export default function App() {
       </div>
 
       <header className="border-b border-white/10 bg-slate-950/70 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-col gap-8 px-6 py-12 lg:flex-row lg:items-center lg:justify-between">
+        <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-8 px-6 py-12 lg:flex-row lg:items-center lg:justify-between">
           <div className="max-w-2xl">
             <p className="text-sm uppercase tracking-[0.45em] text-slate-300/70">Helios</p>
             <h1 className="mt-4 text-4xl font-semibold leading-tight text-white sm:text-5xl">
@@ -197,30 +204,35 @@ export default function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-6 py-12">
-        <div className="grid grid-cols-1 gap-10 xl:grid-cols-[2fr_1fr]">
+      <main className="mx-auto w-full max-w-[1600px] px-6 py-12">
+        <div className="grid grid-cols-1 gap-10 xl:grid-cols-[2.7fr_1fr] 2xl:gap-12">
           <section className="space-y-8">
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="text-xs uppercase tracking-[0.35em] text-slate-400/80">Symbol focus</div>
-                <div className="flex flex-wrap gap-2">
-                  {availableSymbols.map((symbol) => (
-                    <button
-                      key={symbol}
-                      className={clsx(
-                        'rounded-full border px-4 py-1.5 text-xs font-semibold transition focus:outline-none focus:ring-2 focus:ring-emerald-300/60',
-                        selectedSymbol === symbol
-                          ? 'border-emerald-400/70 bg-emerald-500/20 text-emerald-100'
-                          : 'border-white/10 bg-white/5 text-slate-200 hover:border-emerald-400/40 hover:text-emerald-100'
-                      )}
-                      onClick={() => setSelectedSymbol(symbol)}
-                    >
-                      {symbol}
-                    </button>
-                  ))}
+            <EquityChart endpoint={dashboardConfig.equityEndpoint} />
+
+            <div className="rounded-3xl border border-white/10 bg-gradient-to-r from-slate-950/80 via-blue-900/40 to-slate-950/80 p-8 shadow-[0_40px_120px_-65px_rgba(59,130,246,0.6)]">
+              <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-[0.45em] text-slate-200/70">Win rate</p>
+                  <div className="text-5xl font-bold text-white sm:text-6xl">
+                    {loading ? '—' : `${winRate.toFixed(2)}%`}
+                  </div>
+                  <p className="text-sm text-slate-300/80">
+                    {loading
+                      ? 'Waiting for first trades to settle.'
+                      : `Captured across ${trades.toLocaleString()} trades with ${wins.toLocaleString()} wins and ${losses.toLocaleString()} losses.`}
+                  </p>
+                </div>
+                <div className="flex flex-col gap-3 text-sm text-slate-200/80">
+                  <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3">
+                    <span className="text-xs uppercase tracking-[0.35em] text-emerald-200/80">Wins</span>
+                    <div className="text-2xl font-semibold text-emerald-100">{wins.toLocaleString()}</div>
+                  </div>
+                  <div className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3">
+                    <span className="text-xs uppercase tracking-[0.35em] text-rose-200/80">Losses</span>
+                    <div className="text-2xl font-semibold text-rose-100">{losses.toLocaleString()}</div>
+                  </div>
                 </div>
               </div>
-              <PriceChart symbol={selectedSymbol} endpoint={dashboardConfig.chartsEndpoint} />
             </div>
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -236,7 +248,7 @@ export default function App() {
               <MetricCard title="Realized" value={metrics?.realized ?? 0} prefix="$" loading={loading} />
             </div>
 
-            <MoversBoard endpoint={dashboardConfig.moversEndpoint} />
+            <PerformanceBoard entries={metrics?.performance ?? []} loading={loading} />
           </section>
 
           <aside className="space-y-6">
@@ -257,7 +269,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-white/10 bg-slate-950/80">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-6 py-6 text-sm text-slate-300/90 sm:flex-row sm:items-center sm:justify-between">
+        <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4 px-6 py-6 text-sm text-slate-300/90 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-1">
             <span className="text-xs uppercase tracking-[0.35em] text-slate-400/80">OpenAI usage</span>
             {openAiUsage ? (

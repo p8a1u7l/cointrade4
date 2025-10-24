@@ -4,6 +4,7 @@ interface ImportMetaEnv {
   readonly VITE_MOVERS_ENDPOINT: string;
   readonly VITE_SIGNALS_ENDPOINT: string;
   readonly VITE_CHARTS_ENDPOINT: string;
+  readonly VITE_EQUITY_ENDPOINT?: string;
   readonly VITE_SYMBOLS?: string;
 }
 

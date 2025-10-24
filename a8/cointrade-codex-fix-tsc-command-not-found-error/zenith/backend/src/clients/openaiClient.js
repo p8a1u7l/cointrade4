@@ -10,25 +10,22 @@ const STRATEGY_SYSTEM_PROMPT = [
   'Prefer concise language and never add extra commentary.',
 ].join(' ');
 
-const STRATEGY_RESPONSE_SCHEMA = {
-  type: 'json_schema',
-  json_schema: {
-    name: 'zenith_strategy',
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['bias', 'confidence', 'reasoning'],
-      properties: {
-        symbol: { type: 'string', minLength: 1 },
-        bias: { type: 'string', enum: ['long', 'short', 'flat'] },
-        confidence: {
-          oneOf: [
-            { type: 'number', minimum: 0, maximum: 1 },
-            { type: 'string', minLength: 1 },
-          ],
-        },
-        reasoning: { type: 'string', minLength: 1 },
+const STRATEGY_JSON_SCHEMA = {
+  name: 'zenith_strategy',
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['bias', 'confidence', 'reasoning'],
+    properties: {
+      symbol: { type: 'string', minLength: 1 },
+      bias: { type: 'string', enum: ['long', 'short', 'flat'] },
+      confidence: {
+        oneOf: [
+          { type: 'number', minimum: 0, maximum: 1 },
+          { type: 'string', minLength: 1 },
+        ],
       },
+      reasoning: { type: 'string', minLength: 1 },
     },
   },
 };
@@ -36,13 +33,13 @@ const STRATEGY_RESPONSE_SCHEMA = {
 const MODEL_PIPELINE = [
   {
     id: 'gpt-5.1-nano',
-    maxOutputTokens: 72,
+    maxOutputTokens: 60,
     temperature: 0.1,
     minConfidence: 0.58,
   },
   {
     id: 'gpt-5.1-mini',
-    maxOutputTokens: 96,
+    maxOutputTokens: 80,
     temperature: 0.15,
   },
 ];
@@ -244,7 +241,11 @@ async function callOpenAi(prompt, spec) {
         ],
         max_output_tokens: spec.maxOutputTokens,
         temperature: spec.temperature ?? 0.2,
-        response_format: STRATEGY_RESPONSE_SCHEMA,
+        modalities: ['text'],
+        text: {
+          format: 'json_schema',
+          json_schema: STRATEGY_JSON_SCHEMA,
+        },
         metadata: {
           application: 'zenith-trader',
           intent: 'strategy',
