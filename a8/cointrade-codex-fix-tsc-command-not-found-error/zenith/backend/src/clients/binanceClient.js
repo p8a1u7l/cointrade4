@@ -128,6 +128,167 @@ export class BinanceClient {
     }));
   }
 
+  async fetchHistoricalKlines(symbol, interval = '1m', options = {}) {
+    const maxCandles = Math.max(1, Math.min(Number(options.maxCandles ?? 500), 5000));
+    const endTime = options.endTime ? Number(options.endTime) : undefined;
+    let cursor = options.startTime ? Number(options.startTime) : undefined;
+    let fetched = 0;
+    const candles = [];
+
+    while (fetched < maxCandles) {
+      const batchLimit = Math.min(500, maxCandles - fetched);
+      const params = new URLSearchParams({
+        symbol,
+        interval,
+        limit: String(batchLimit),
+      });
+      if (cursor !== undefined) {
+        params.set('startTime', String(cursor));
+      }
+      if (endTime !== undefined) {
+        params.set('endTime', String(endTime));
+      }
+
+      const response = await fetch(`${this.baseUrl}/fapi/v1/klines?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`Binance klines request failed: ${response.status}`);
+      }
+      const data = await response.json();
+      if (!Array.isArray(data) || data.length === 0) {
+        break;
+      }
+
+      for (const entry of data) {
+        candles.push({
+          openTime: Number(entry[0]),
+          open: Number(entry[1]),
+          high: Number(entry[2]),
+          low: Number(entry[3]),
+          close: Number(entry[4]),
+          volume: Number(entry[5]),
+          closeTime: Number(entry[6]),
+        });
+      }
+
+      fetched += data.length;
+      const last = candles[candles.length - 1];
+      if (!last) {
+        break;
+      }
+
+      const nextCursor = last.closeTime + 1;
+      if (cursor !== undefined && nextCursor <= cursor) {
+        break;
+      }
+
+      cursor = nextCursor;
+      if (endTime !== undefined && cursor > endTime) {
+        break;
+      }
+
+      if (data.length < batchLimit) {
+        break;
+      }
+    }
+
+    return candles.slice(0, maxCandles);
+  }
+
+  async fetch24hTicker(symbol) {
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(symbol)}`
+      );
+      if (!response.ok) {
+        throw new Error(`Binance 24hr ticker request failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      return {
+        priceChangePercent: Number(payload.priceChangePercent ?? 0),
+        lastPrice: Number(payload.lastPrice ?? 0),
+        openPrice: Number(payload.openPrice ?? 0),
+        highPrice: Number(payload.highPrice ?? 0),
+        lowPrice: Number(payload.lowPrice ?? 0),
+        volume: Number(payload.volume ?? 0),
+        quoteVolume: Number(payload.quoteVolume ?? 0),
+        closeTime: Number(payload.closeTime ?? Date.now()),
+      };
+    } catch (error) {
+      logger.error({ error, symbol }, 'Failed to fetch Binance 24hr ticker');
+      throw error;
+    }
+  }
+
+  async fetchFundingRate(symbol) {
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/fapi/v1/premiumIndex?symbol=${encodeURIComponent(symbol)}`
+      );
+      if (!response.ok) {
+        throw new Error(`Binance funding rate request failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      return {
+        markPrice: Number(payload.markPrice ?? 0),
+        indexPrice: Number(payload.indexPrice ?? 0),
+        lastFundingRate: Number(payload.lastFundingRate ?? 0),
+        nextFundingTime: Number(payload.nextFundingTime ?? 0),
+        estimatedSettlePrice: Number(payload.estimatedSettlePrice ?? 0),
+      };
+    } catch (error) {
+      logger.error({ error, symbol }, 'Failed to fetch Binance funding data');
+      throw error;
+    }
+  }
+
+  async fetchOpenInterest(symbol) {
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/fapi/v1/openInterest?symbol=${encodeURIComponent(symbol)}`
+      );
+      if (!response.ok) {
+        throw new Error(`Binance open interest request failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      return {
+        openInterest: Number(payload.openInterest ?? 0),
+        time: Number(payload.time ?? Date.now()),
+      };
+    } catch (error) {
+      logger.error({ error, symbol }, 'Failed to fetch Binance open interest');
+      throw error;
+    }
+  }
+
+  async fetchTakerLongShortRatio(symbol, period = '5m', limit = 12) {
+    try {
+      const params = new URLSearchParams({
+        symbol,
+        period,
+        limit: String(Math.max(1, Math.min(limit, 500))),
+      });
+      const response = await fetch(
+        `${this.baseUrl}/futures/data/takerlongshortRatio?${params.toString()}`
+      );
+      if (!response.ok) {
+        throw new Error(`Binance taker ratio request failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      if (!Array.isArray(payload)) {
+        throw new Error('Binance taker ratio payload was not an array');
+      }
+      return payload.map((entry) => ({
+        buyVolume: Number(entry.buyVol ?? 0),
+        sellVolume: Number(entry.sellVol ?? 0),
+        buySellRatio: Number(entry.buySellRatio ?? 0),
+        timestamp: Number(entry.timestamp ?? entry.time ?? 0),
+      }));
+    } catch (error) {
+      logger.error({ error, symbol, period, limit }, 'Failed to fetch Binance taker long/short ratio');
+      throw error;
+    }
+  }
+
   signParams(params) {
     const timestamp = Date.now();
     const query = new URLSearchParams({ ...params, timestamp: String(timestamp) });
