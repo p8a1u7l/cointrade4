@@ -36,13 +36,13 @@ const STRATEGY_RESPONSE_SCHEMA = {
 const MODEL_PIPELINE = [
   {
     id: 'gpt-5.1-nano',
-    maxOutputTokens: 72,
+    maxOutputTokens: 60,
     temperature: 0.1,
     minConfidence: 0.58,
   },
   {
     id: 'gpt-5.1-mini',
-    maxOutputTokens: 96,
+    maxOutputTokens: 80,
     temperature: 0.15,
   },
 ];

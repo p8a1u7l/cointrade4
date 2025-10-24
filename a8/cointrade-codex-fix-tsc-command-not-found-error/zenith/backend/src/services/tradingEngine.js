@@ -327,6 +327,92 @@ export class TradingEngine extends TypedEventEmitter {
       return Math.max(0, Math.min(1, numeric));
     };
 
+    const safeRound = (value, digits = 2) => {
+      if (!Number.isFinite(value)) {
+        return undefined;
+      }
+      return round(value, digits);
+    };
+
+    const trimReasoning = (text, wordLimit = 18) => {
+      if (typeof text !== 'string') {
+        return undefined;
+      }
+      const words = text.trim().split(/\s+/);
+      if (words.length <= wordLimit) {
+        return words.join(' ');
+      }
+      return `${words.slice(0, wordLimit).join(' ')}…`;
+    };
+
+    const condensePromptContext = (context, emphasiseLocal) => {
+      if (!context || typeof context !== 'object') {
+        return null;
+      }
+
+      const local = context.local_signal ?? {};
+      const localSummary = {
+        bias: local.bias ?? null,
+        confidence: Number.isFinite(local.confidence) ? round(local.confidence, 2) : undefined,
+        edge: Number.isFinite(local.edgeScore) ? round(local.edgeScore, 2) : undefined,
+        reasoning: trimReasoning(local.reasoning, emphasiseLocal ? 12 : 18),
+      };
+
+      const base = {
+        symbol: context.symbol,
+        price: safeRound(context.price, 2),
+        change_1m_pct: safeRound(context.change_1m_pct, 2),
+        change_5m_pct: safeRound(context.change_5m_pct, 2),
+        change_15m_pct: safeRound(context.change_15m_pct, 2),
+        rsi_14: safeRound(context.rsi_14, 2),
+        vol_ratio: safeRound(context.vol_ratio, 2),
+        atr_pct: safeRound(context.atr_pct, 3),
+        edge_score: safeRound(context.edge_score, 2),
+        local_signal: localSummary,
+      };
+
+      if (!emphasiseLocal) {
+        base.volatility_pct = safeRound(context.volatility_pct, 3);
+        base.vol_change_pct = safeRound(context.vol_change_pct, 2);
+        base.vol_accel_pct = safeRound(context.vol_accel_pct, 2);
+        base.mfi_14 = safeRound(context.mfi_14, 2);
+        base.obv_slope_pct = safeRound(context.obv_slope_pct, 2);
+        base.support = safeRound(context.support, 2);
+        base.resistance = safeRound(context.resistance, 2);
+      }
+
+      if (context.ticker_24h && typeof context.ticker_24h === 'object') {
+        base.ticker_24h = {
+          change_pct: safeRound(context.ticker_24h.change_pct, 2),
+          high: safeRound(context.ticker_24h.high, 2),
+          low: safeRound(context.ticker_24h.low, 2),
+        };
+      }
+
+      if (context.derivatives && typeof context.derivatives === 'object') {
+        base.derivatives = {
+          funding_rate: safeRound(context.derivatives.funding_rate, 4),
+          mark_price: safeRound(context.derivatives.mark_price, 2),
+          index_price: safeRound(context.derivatives.index_price, 2),
+        };
+      }
+
+      if (context.open_interest && typeof context.open_interest === 'object') {
+        base.open_interest = {
+          contracts: safeRound(context.open_interest.contracts, 2),
+        };
+      }
+
+      if (context.taker_flow && typeof context.taker_flow === 'object') {
+        base.taker_flow = {
+          ratio: safeRound(context.taker_flow.ratio, 3),
+          bias: context.taker_flow.bias,
+        };
+      }
+
+      return JSON.stringify(base);
+    };
+
     const priceReference = snapshot.metrics.lastPrice;
     const localSignal = snapshot.metrics.localSignal;
     const localEdge = Number.isFinite(localSignal?.edgeScore) ? localSignal.edgeScore : 0;
@@ -344,32 +430,12 @@ export class TradingEngine extends TypedEventEmitter {
       : Infinity;
     const ageMs = cached ? now - cached.timestamp : Infinity;
 
-    const shouldBypassOpenAi =
+    const strongLocalSignal =
       localSignal.bias !== 'flat' &&
       ((localSignal.confidence >= 0.68 && localEdge >= 0.48) || localSignal.confidence >= 0.82 || localEdge >= 0.62);
 
-    if (shouldBypassOpenAi) {
-      const decision = {
-        symbol,
-        bias: localSignal.bias,
-        confidence: localConfidence,
-        reasoning: `${localSignal.reasoning} · Local edge ${Math.round(localEdge * 100)}% · Executing local signal without OpenAI call`,
-        localEdge,
-        localConfidence,
-        localBias: localSignal.bias,
-        entryPrice: priceReference,
-      };
-      this.decisionCache.set(symbol, {
-        decision,
-        price: priceReference,
-        timestamp: now,
-        source: 'local',
-        contextSnapshot: promptSnapshot ?? null,
-        model: 'local',
-      });
-      logger.info({ symbol, localSignal }, 'Executing locally derived decision');
-      return decision;
-    }
+    const contextForAi =
+      condensePromptContext(promptSnapshot, strongLocalSignal) ?? snapshot.promptContext;
 
     const previousContext = cached?.contextSnapshot;
     const hasContextSnapshots = Boolean(previousContext && promptSnapshot);
@@ -419,7 +485,7 @@ export class TradingEngine extends TypedEventEmitter {
       return reused;
     }
 
-    const llmDecision = await requestStrategy(symbol, snapshot.promptContext);
+    const llmDecision = await requestStrategy(symbol, contextForAi);
     const enhanced = {
       ...llmDecision,
       bias: llmDecision.bias ?? localSignal.bias,
@@ -432,7 +498,23 @@ export class TradingEngine extends TypedEventEmitter {
       localConfidence,
       localBias: localSignal.bias,
       entryPrice: priceReference,
+      promptContextSize: typeof contextForAi === 'string' ? contextForAi.length : undefined,
     };
+
+    if (strongLocalSignal) {
+      const localSnippet = trimReasoning(localSignal.reasoning, 12);
+      const edgePercent = Number.isFinite(localEdge) ? Math.round(localEdge * 100) : undefined;
+      const localAnnotationParts = [];
+      if (localSnippet) {
+        localAnnotationParts.push(localSnippet);
+      }
+      if (edgePercent !== undefined) {
+        localAnnotationParts.push(`edge ${edgePercent}%`);
+      }
+      localAnnotationParts.push(`confidence ${Math.round(localConfidence * 100)}%`);
+      enhanced.reasoning = `${enhanced.reasoning} · Local confirms: ${localAnnotationParts.join(' · ')}`;
+      enhanced.confidence = clampConfidence(Math.max(enhanced.confidence, localConfidence));
+    }
 
     if (tick) {
       enhanced.marketTime = new Date(tick.eventTime).toISOString();
