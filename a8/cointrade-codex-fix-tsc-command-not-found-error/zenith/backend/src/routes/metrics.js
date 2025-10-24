@@ -39,5 +39,15 @@ export function createMetricsRouter(engine, binance) {
     }
   });
 
+  router.get('/equity/series', (req, res) => {
+    const requestedLimit = Number(req.query.limit ?? '240');
+    const points = analyticsStore.getEquitySeries(requestedLimit);
+    if (points.length === 0) {
+      res.json({ points: [], message: 'No equity history available yet' });
+      return;
+    }
+    res.json({ points });
+  });
+
   return router;
 }

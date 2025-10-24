@@ -101,6 +101,7 @@ export class BinanceRealtimeFeed extends TypedEventEmitter {
 export class BinanceClient {
   constructor() {
     this.baseUrl = REST_BASE_URL;
+    this.symbolFilters = new Map();
   }
 
   async fetchKlines(symbol, interval = '1m', limit = 120) {
@@ -273,9 +274,20 @@ export class BinanceClient {
       if (!response.ok) {
         throw new Error(`Binance taker ratio request failed: ${response.status}`);
       }
-      const payload = await response.json();
+      const raw = await response.text();
+      if (!raw || raw.trim().length === 0) {
+        return [];
+      }
+      let payload;
+      try {
+        payload = JSON.parse(raw);
+      } catch (parseError) {
+        logger.warn({ error: parseError, symbol, period, limit }, 'Unable to parse Binance taker ratio payload');
+        return [];
+      }
       if (!Array.isArray(payload)) {
-        throw new Error('Binance taker ratio payload was not an array');
+        logger.warn({ symbol, period, limit }, 'Binance taker ratio payload was not an array');
+        return [];
       }
       return payload.map((entry) => ({
         buyVolume: Number(entry.buyVol ?? 0),
@@ -285,7 +297,7 @@ export class BinanceClient {
       }));
     } catch (error) {
       logger.error({ error, symbol, period, limit }, 'Failed to fetch Binance taker long/short ratio');
-      throw error;
+      return [];
     }
   }
 
@@ -305,10 +317,126 @@ export class BinanceClient {
       method,
       headers: { 'X-MBX-APIKEY': config.binance.apiKey },
     });
+    const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Binance request failed: ${response.status}`);
+      let details = '';
+      if (text) {
+        try {
+          const payload = JSON.parse(text);
+          if (payload?.msg) {
+            details = ` (${payload.msg})`;
+          }
+        } catch (_error) {
+          details = ` (${text})`;
+        }
+      }
+      throw new Error(`Binance request failed: ${response.status}${details}`);
     }
-    return await response.json();
+    if (!text) {
+      return {};
+    }
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      logger.error({ error, path, method }, 'Failed to parse Binance response payload');
+      throw error;
+    }
+  }
+
+  async fetchSymbolFilters(symbol) {
+    const key = symbol.toUpperCase();
+    if (this.symbolFilters.has(key)) {
+      return this.symbolFilters.get(key);
+    }
+
+    const response = await fetch(
+      `${this.baseUrl}/fapi/v1/exchangeInfo?symbol=${encodeURIComponent(key)}`
+    );
+    if (!response.ok) {
+      throw new Error(`Binance exchange info request failed: ${response.status}`);
+    }
+    const payload = await response.json();
+    const info = Array.isArray(payload?.symbols) ? payload.symbols[0] : null;
+    if (!info) {
+      throw new Error(`Exchange info missing symbol data for ${key}`);
+    }
+
+    const findFilter = (type) =>
+      Array.isArray(info.filters) ? info.filters.find((filter) => filter?.filterType === type) : undefined;
+
+    const lotFilter = findFilter('MARKET_LOT_SIZE') ?? findFilter('LOT_SIZE');
+    const notionalFilter = findFilter('NOTIONAL') ?? findFilter('MIN_NOTIONAL');
+
+    const toNumber = (value, fallback = 0) => {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : fallback;
+    };
+
+    const filters = {
+      stepSize: toNumber(lotFilter?.stepSize, 0),
+      minQty: toNumber(lotFilter?.minQty, 0),
+      maxQty: toNumber(lotFilter?.maxQty, Number.POSITIVE_INFINITY),
+      minNotional: toNumber(notionalFilter?.minNotional ?? notionalFilter?.notional, 0),
+      maxNotional: toNumber(notionalFilter?.maxNotional, Number.POSITIVE_INFINITY),
+    };
+
+    this.symbolFilters.set(key, filters);
+    return filters;
+  }
+
+  static quantize(value, stepSize) {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    if (!Number.isFinite(stepSize) || stepSize <= 0) {
+      return Number(value.toFixed(6));
+    }
+    const precision = Math.min(8, Math.max(0, Math.round(-Math.log10(stepSize))));
+    const steps = Math.floor(value / stepSize);
+    const quantized = steps * stepSize;
+    return Number(quantized.toFixed(precision));
+  }
+
+  async ensureTradableQuantity(symbol, desiredQty, referencePrice) {
+    if (!Number.isFinite(desiredQty) || desiredQty <= 0) {
+      return 0;
+    }
+
+    try {
+      const filters = await this.fetchSymbolFilters(symbol);
+      let quantity = BinanceClient.quantize(desiredQty, filters.stepSize);
+
+      if (quantity < filters.minQty) {
+        const minSteps = Math.ceil(filters.minQty / Math.max(filters.stepSize, 1e-9));
+        quantity = BinanceClient.quantize(minSteps * filters.stepSize, filters.stepSize);
+      }
+
+      if (Number.isFinite(referencePrice) && referencePrice > 0 && filters.minNotional > 0) {
+        const notional = quantity * referencePrice;
+        if (notional < filters.minNotional) {
+          const requiredQty = filters.minNotional / referencePrice;
+          quantity = BinanceClient.quantize(requiredQty, filters.stepSize);
+        }
+      }
+
+      if (quantity > filters.maxQty) {
+        quantity = BinanceClient.quantize(filters.maxQty, filters.stepSize);
+      }
+
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        return 0;
+      }
+
+      if (Number.isFinite(referencePrice) && referencePrice > 0) {
+        const notional = quantity * referencePrice;
+        if (filters.maxNotional && Number.isFinite(filters.maxNotional) && notional > filters.maxNotional) {
+          return 0;
+        }
+      }
+
+      return quantity >= filters.minQty ? quantity : 0;
+    } catch (error) {
+      logger.error({ error, symbol }, 'Failed to normalize Binance quantity');
+      return 0;
+    }
   }
 
   async fetchAccountBalance() {

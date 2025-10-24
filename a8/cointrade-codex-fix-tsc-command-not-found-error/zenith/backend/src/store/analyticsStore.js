@@ -222,6 +222,20 @@ export class AnalyticsStore {
     return round(total);
   }
 
+  getEquitySeries(limit = 240) {
+    const requested = Number(limit);
+    const safeLimit = Number.isFinite(requested)
+      ? Math.max(1, Math.min(Math.floor(requested), this.maxEntries))
+      : Math.min(240, this.maxEntries);
+    const start = Math.max(this.equitySnapshots.length - safeLimit, 0);
+    return this.equitySnapshots.slice(start).map((entry) => ({
+      timestamp: entry.timestamp,
+      equity: Number(entry.equity),
+      balance: Number(entry.balance),
+      pnlPercent: Number(entry.pnlPercent),
+    }));
+  }
+
   getOpenAiUsage() {
     const byModel = Array.from(this.openAiUsage.byModel.values()).map((entry) => ({
       model: entry.model,

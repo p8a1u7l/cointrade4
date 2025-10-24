@@ -17,6 +17,9 @@ const RISK_LEVERAGE = {
 };
 
 const CONTEXT_SHIFT_THRESHOLD = 0.12;
+const MIN_CONFIDENCE_TO_EXECUTE = 0.62;
+const MIN_LOCAL_EDGE = 0.4;
+const MIN_LOCAL_CONFIDENCE = 0.55;
 
 const toNumber = (value) => {
   const numeric = Number(value);
@@ -316,8 +319,18 @@ export class TradingEngine extends TypedEventEmitter {
       return Number(value.toFixed(digits));
     };
 
+    const clampConfidence = (value, fallback = 0) => {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) {
+        return Math.max(0, Math.min(1, fallback));
+      }
+      return Math.max(0, Math.min(1, numeric));
+    };
+
     const priceReference = snapshot.metrics.lastPrice;
     const localSignal = snapshot.metrics.localSignal;
+    const localEdge = Number.isFinite(localSignal?.edgeScore) ? localSignal.edgeScore : 0;
+    const localConfidence = clampConfidence(localSignal?.confidence, 0);
     let promptSnapshot;
     try {
       promptSnapshot = JSON.parse(snapshot.promptContext);
@@ -331,7 +344,6 @@ export class TradingEngine extends TypedEventEmitter {
       : Infinity;
     const ageMs = cached ? now - cached.timestamp : Infinity;
 
-    const localEdge = localSignal.edgeScore ?? 0;
     const shouldBypassOpenAi =
       localSignal.bias !== 'flat' &&
       ((localSignal.confidence >= 0.68 && localEdge >= 0.48) || localSignal.confidence >= 0.82 || localEdge >= 0.62);
@@ -340,8 +352,12 @@ export class TradingEngine extends TypedEventEmitter {
       const decision = {
         symbol,
         bias: localSignal.bias,
-        confidence: localSignal.confidence,
+        confidence: localConfidence,
         reasoning: `${localSignal.reasoning} · Local edge ${Math.round(localEdge * 100)}% · Executing local signal without OpenAI call`,
+        localEdge,
+        localConfidence,
+        localBias: localSignal.bias,
+        entryPrice: priceReference,
       };
       this.decisionCache.set(symbol, {
         decision,
@@ -386,6 +402,11 @@ export class TradingEngine extends TypedEventEmitter {
       const reused = {
         ...rest,
         reasoning: `${rest.reasoning} · ${reuseReason} (price drift ${round(driftPct, 3)}%)`,
+        localEdge,
+        localConfidence,
+        localBias: localSignal.bias,
+        entryPrice: priceReference,
+        confidence: clampConfidence(rest.confidence, localConfidence),
       };
       this.decisionCache.set(symbol, {
         ...cached,
@@ -401,10 +422,16 @@ export class TradingEngine extends TypedEventEmitter {
     const llmDecision = await requestStrategy(symbol, snapshot.promptContext);
     const enhanced = {
       ...llmDecision,
+      bias: llmDecision.bias ?? localSignal.bias,
+      confidence: clampConfidence(llmDecision.confidence, localConfidence || 0.5),
       reasoning: `${llmDecision.reasoning} · Δ5m ${round(snapshot.metrics.change5mPct, 2)}%, RSI ${round(
         snapshot.metrics.rsi14,
         1
       )} · Vol ${round(snapshot.metrics.volumeRatio, 2)} · MFI ${round(snapshot.metrics.mfi14, 1)}`,
+      localEdge,
+      localConfidence,
+      localBias: localSignal.bias,
+      entryPrice: priceReference,
     };
 
     if (tick) {
@@ -423,18 +450,38 @@ export class TradingEngine extends TypedEventEmitter {
   }
 
   async executeDecision(decision) {
-    if (decision.bias === 'flat' || decision.confidence < 0.2) {
+    if (!decision || decision.bias === 'flat') {
       logger.info({ decision }, 'Skipping execution due to neutral signal');
+      return;
+    }
+
+    if (!this.hasStrongConviction(decision)) {
+      logger.info({ decision }, 'Skipping execution due to insufficient conviction');
       return;
     }
 
     const leverage = RISK_LEVERAGE[this.riskLevel];
     const side = decision.bias === 'long' ? 'BUY' : 'SELL';
-    const quantity = this.calculateOrderSize(decision.symbol, leverage, decision.confidence);
+    const confidence = Number(decision.confidence ?? 0);
 
-    if (quantity <= 0) {
-      logger.warn({ decision }, 'Order size evaluated to zero, skipping');
+    let referencePrice = Number(decision.entryPrice);
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
+      const tick = this.latestTicks.get(decision.symbol);
+      if (tick && Number.isFinite(tick.price) && tick.price > 0) {
+        referencePrice = tick.price;
+      }
+    }
+
+    const rawQuantity = this.calculateOrderSize(decision.symbol, leverage, confidence, referencePrice);
+    const quantity = await this.binance.ensureTradableQuantity(decision.symbol, rawQuantity, referencePrice);
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      logger.warn({ decision, referencePrice, rawQuantity }, 'Normalized order size invalid, skipping execution');
       return;
+    }
+
+    if (Math.abs(quantity - rawQuantity) > Math.max(1e-8, rawQuantity * 0.05)) {
+      logger.debug({ decision, rawQuantity, quantity }, 'Adjusted quantity to satisfy Binance filters');
     }
 
     await this.binance.setLeverage(decision.symbol, leverage);
@@ -452,11 +499,37 @@ export class TradingEngine extends TypedEventEmitter {
     logger.info({ decision, result }, 'Executed market order');
   }
 
-  calculateOrderSize(symbol, leverage, confidence) {
-    const baseSize = 0.001;
-    const scaled = baseSize * leverage * Math.max(confidence, 0.1);
-    logger.debug({ symbol, scaled }, 'Calculated order size');
-    return Number(scaled.toFixed(4));
+  calculateOrderSize(symbol, leverage, confidence, referencePrice) {
+    const safeConfidence = Number.isFinite(confidence) ? Math.max(confidence, 0.1) : 0.1;
+    const baseNotional = 40;
+    const targetNotional = baseNotional * Math.max(leverage, 1) * safeConfidence;
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
+      const fallbackQty = Number((targetNotional / 1000).toFixed(6));
+      logger.debug({ symbol, fallbackQty }, 'Calculated fallback order size without reference price');
+      return fallbackQty;
+    }
+    const quantity = targetNotional / referencePrice;
+    logger.debug({ symbol, quantity, referencePrice, targetNotional }, 'Calculated order size');
+    return Number(quantity.toFixed(6));
+  }
+
+  hasStrongConviction(decision) {
+    const confidence = Number(decision?.confidence ?? 0);
+    if (!Number.isFinite(confidence) || confidence < MIN_CONFIDENCE_TO_EXECUTE) {
+      return false;
+    }
+
+    const localEdge = Number(decision?.localEdge ?? decision?.edgeScore ?? 0);
+    if (!Number.isFinite(localEdge) || localEdge < MIN_LOCAL_EDGE) {
+      return false;
+    }
+
+    const localConfidence = Number(decision?.localConfidence ?? 0);
+    if (Number.isFinite(localConfidence) && localConfidence < MIN_LOCAL_CONFIDENCE) {
+      return false;
+    }
+
+    return true;
   }
 
   async captureEquitySnapshot(options = {}) {
