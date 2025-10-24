@@ -1,0 +1,12 @@
+{
+  "name": "zenith-backend",
+  "version": "1.0.0",
+  "description": "Trading orchestrator API for the Zenith Trader Suite",
+  "type": "module",
+  "scripts": {
+    "build": "node -e \"console.log('Build step skipped: sources are plain JavaScript.')\"",
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "test": "node src/selfTest.js"
+  }
+}
