@@ -226,7 +226,7 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
                     x={point.x}
                     y={chartHeight - paddingY + 24}
                     textAnchor="middle"
-                    className="fill-slate-400/70 text-[10px]"
+                    className="fill-white/80 text-[10px]"
                   >
                     {formatTime(point.timestamp)}
                   </text>
@@ -247,7 +247,7 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
               <text
                 x={chartWidth - paddingX + 8}
                 y={chartPoints[chartPoints.length - 1].y + 4}
-                className="fill-slate-200 text-[11px]"
+                className="fill-white text-[11px]"
               >
                 {formatUsd(chartPoints[chartPoints.length - 1].equity)}
               </text>

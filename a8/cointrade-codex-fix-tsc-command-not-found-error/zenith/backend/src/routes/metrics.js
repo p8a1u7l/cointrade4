@@ -11,6 +11,8 @@ export function createMetricsRouter(engine, binance) {
       const baseline = analyticsStore.getBaselineEquity();
       const snapshot = await fetchEquitySnapshot(binance, baseline);
       const normalized = analyticsStore.addEquity(snapshot);
+      const winStats = analyticsStore.getWinStats();
+      const performance = analyticsStore.getSymbolPerformance();
 
       res.json({
         balance: normalized.balance,
@@ -19,11 +21,18 @@ export function createMetricsRouter(engine, binance) {
         realized: analyticsStore.getRealizedPnl(),
         riskLevel: engine.getRiskLevel(),
         openAi: analyticsStore.getOpenAiUsage(),
+        winRate: winStats.winRate,
+        wins: winStats.wins,
+        losses: winStats.losses,
+        breakeven: winStats.breakeven,
+        trades: winStats.trades,
+        performance,
       });
     } catch (error) {
       logger.error({ error }, 'Failed to refresh live equity metrics');
       const cached = analyticsStore.getLatestEquity();
       if (cached) {
+        const winStats = analyticsStore.getWinStats();
         res.json({
           balance: cached.balance,
           equity: cached.equity,
@@ -31,6 +40,12 @@ export function createMetricsRouter(engine, binance) {
           realized: analyticsStore.getRealizedPnl(),
           riskLevel: engine.getRiskLevel(),
           openAi: analyticsStore.getOpenAiUsage(),
+          winRate: winStats.winRate,
+          wins: winStats.wins,
+          losses: winStats.losses,
+          breakeven: winStats.breakeven,
+          trades: winStats.trades,
+          performance: analyticsStore.getSymbolPerformance(),
         });
         return;
       }

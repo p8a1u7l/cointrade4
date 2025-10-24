@@ -45,8 +45,17 @@ export class AnalyticsStore {
         avgEntryPrice: 0,
         realizedPnl: 0,
         totalVolume: 0,
+        wins: 0,
+        losses: 0,
+        breakeven: 0,
+        trades: 0,
         lastUpdated: now,
       };
+
+    if (existing.wins === undefined) existing.wins = 0;
+    if (existing.losses === undefined) existing.losses = 0;
+    if (existing.breakeven === undefined) existing.breakeven = 0;
+    if (existing.trades === undefined) existing.trades = 0;
 
     const previousQty = existing.netContracts;
     const previousAbs = Math.abs(previousQty);
@@ -66,7 +75,19 @@ export class AnalyticsStore {
         Math.sign(previousQty) > 0
           ? result.avgPrice - existing.avgEntryPrice
           : existing.avgEntryPrice - result.avgPrice;
-      existing.realizedPnl += closingQty * pnlPerContract;
+      const realized = closingQty * pnlPerContract;
+      existing.realizedPnl += realized;
+      if (closingQty > 0) {
+        existing.trades += 1;
+        const epsilon = 1e-8;
+        if (realized > epsilon) {
+          existing.wins += 1;
+        } else if (realized < -epsilon) {
+          existing.losses += 1;
+        } else {
+          existing.breakeven += 1;
+        }
+      }
 
       const remainingFromExisting = previousAbs - closingQty;
       const remainingFromIncoming = incomingAbs - closingQty;
@@ -269,8 +290,32 @@ export class AnalyticsStore {
       net_contracts: Number(stats.netContracts.toFixed(4)),
       avg_entry_price: round(stats.avgEntryPrice),
       total_volume: Number(stats.totalVolume.toFixed(4)),
+      wins: stats.wins ?? 0,
+      losses: stats.losses ?? 0,
+      breakeven: stats.breakeven ?? 0,
+      trades: stats.trades ?? 0,
+      win_rate:
+        stats.trades && stats.trades > 0 ? round((stats.wins / stats.trades) * 100, 2) : 0,
       last_updated: stats.lastUpdated,
     }));
+  }
+
+  getWinStats() {
+    let wins = 0;
+    let losses = 0;
+    let breakeven = 0;
+    let trades = 0;
+
+    for (const stats of this.symbolStats.values()) {
+      wins += stats.wins ?? 0;
+      losses += stats.losses ?? 0;
+      breakeven += stats.breakeven ?? 0;
+      trades += stats.trades ?? 0;
+    }
+
+    const winRate = trades > 0 ? round((wins / trades) * 100, 2) : 0;
+
+    return { wins, losses, breakeven, trades, winRate };
   }
 
   getRecentSignals(limit = 5) {
